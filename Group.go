@@ -49,11 +49,17 @@ func (g Group) ListMembers() (Users, error) {
 	}
 	resource := fmt.Sprintf("/groups/%v/members", g.ID)
 
-	var marsh struct {
-		Users Users `json:"value"`
+	var userlist Users
+	getUsers := func(pageOfUsers *Users) error {
+		for _, u := range *pageOfUsers {
+			userlist = append(userlist, u)
+		}
+		return nil
 	}
-	marsh.Users.setGraphClient(g.graphClient)
-	return marsh.Users, g.graphClient.makeGETAPICall(resource, nil, &marsh)
+
+	err := g.graphClient.makeGETUsersCall(resource, getUsers)
+	userlist.setGraphClient(g.graphClient)
+	return userlist, err
 }
 
 // UnmarshalJSON implements the json unmarshal to be used by the json-library
@@ -102,4 +108,28 @@ func (g *Group) UnmarshalJSON(data []byte) error {
 	g.Visibility = tmp.Visibility
 
 	return nil
+}
+
+func (g Group) AddMember(id string) error {
+	if g.graphClient == nil {
+		return ErrNotGraphClientSourced
+	}
+	resource := fmt.Sprintf("/groups/%v/members/$ref", g.ID)
+	type idStruct struct {
+		ID string `json:"@odata.id"`
+	}
+	ids := idStruct{ID: fmt.Sprintf("https://graph.microsoft.com/v1.0/users/%s", id)}
+	jsonID, err := json.Marshal(ids)
+	if err != nil {
+		return err
+	}
+	return g.graphClient.makePOSTAPICall(resource, string(jsonID))
+}
+
+func (g Group) RemoveMember(id string) error {
+	if g.graphClient == nil {
+		return ErrNotGraphClientSourced
+	}
+	resource := fmt.Sprintf("/groups/%v/members/%s/$ref", g.ID, id)
+	return g.graphClient.makeDELETEAPICall(resource)
 }

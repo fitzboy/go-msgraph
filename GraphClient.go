@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -125,6 +126,121 @@ func (g *GraphClient) makeGETAPICall(apicall string, getParams url.Values, v int
 	return g.performRequest(req, v)
 }
 
+// makeGETAPICall performs an API-Call to the msgraph API. This func uses sync.Mutex to synchronize all API-calls
+func (g *GraphClient) makeGETUsersCall(apicall string, f func(*Users) error) error {
+	g.apiCall.Lock()
+	defer g.apiCall.Unlock() // unlock when the func returns
+	// Check token
+	if g.token.WantsToBeRefreshed() { // Token not valid anymore?
+		err := g.refreshToken()
+		if err != nil {
+			return err
+		}
+	}
+
+	reqURL, err := url.ParseRequestURI(BaseURL)
+	if err != nil {
+		return fmt.Errorf("Unable to parse URI %v: %v", BaseURL, err)
+	}
+
+	// Add Version to API-Call, the leading slash is always added by the calling func
+	reqURL.Path = "/" + APIVersion + apicall
+	//	q, _ := url.ParseQuery(reqURL.RawQuery)
+	//	q.Add("$select", "userPrincipalName,userType")
+	//	reqURL.RawQuery = q.Encode()
+	req, err := http.NewRequest("GET", reqURL.String(), nil)
+	if err != nil {
+		return fmt.Errorf("HTTP request error: %v", err)
+	}
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Authorization", g.token.GetAccessToken())
+
+	for {
+		var pageOfUsers struct {
+			Userlist Users  `json:"value"`
+			NextPage string `json:"@odata.nextLink"`
+		}
+
+		err = g.performRequest(req, &pageOfUsers)
+		if err != nil {
+			return fmt.Errorf("couldn't GETUsersCall, %v", err)
+		}
+		err = f(&pageOfUsers.Userlist)
+		if err != nil {
+			return fmt.Errorf("couldn't do our own call %v", err)
+		}
+		if pageOfUsers.NextPage == "" {
+			break
+		}
+		req, err = http.NewRequest("GET", pageOfUsers.NextPage, nil)
+		if err != nil {
+			return fmt.Errorf("HTTP request error: %v", err)
+		}
+		req.Header.Add("Content-Type", "application/json")
+		req.Header.Add("Authorization", g.token.GetAccessToken())
+	}
+	return nil
+}
+
+func (g *GraphClient) makePOSTAPICall(apicall, body string) error {
+	g.apiCall.Lock()
+	defer g.apiCall.Unlock() // unlock when the func returns
+	// Check token
+	if g.token.WantsToBeRefreshed() { // Token not valid anymore?
+		err := g.refreshToken()
+		if err != nil {
+			return err
+		}
+	}
+
+	reqURL, err := url.ParseRequestURI(BaseURL)
+	if err != nil {
+		return fmt.Errorf("Unable to parse URI %v: %v", BaseURL, err)
+	}
+
+	// Add Version to API-Call, the leading slash is always added by the calling func
+	reqURL.Path = "/" + APIVersion + apicall
+
+	req, err := http.NewRequest("POST", reqURL.String(), strings.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("HTTP request error: %v", err)
+	}
+
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Authorization", g.token.GetAccessToken())
+
+	return g.performRequest(req, nil)
+}
+
+func (g *GraphClient) makeDELETEAPICall(apicall string) error {
+	g.apiCall.Lock()
+	defer g.apiCall.Unlock() // unlock when the func returns
+	// Check token
+	if g.token.WantsToBeRefreshed() { // Token not valid anymore?
+		err := g.refreshToken()
+		if err != nil {
+			return err
+		}
+	}
+
+	reqURL, err := url.ParseRequestURI(BaseURL)
+	if err != nil {
+		return fmt.Errorf("Unable to parse URI %v: %v", BaseURL, err)
+	}
+
+	// Add Version to API-Call, the leading slash is always added by the calling func
+	reqURL.Path = "/" + APIVersion + apicall
+
+	req, err := http.NewRequest("DELETE", reqURL.String(), nil)
+	if err != nil {
+		return fmt.Errorf("HTTP request error: %v", err)
+	}
+
+	req.Header.Add("Authorization", g.token.GetAccessToken())
+
+	return g.performRequest(req, nil)
+}
+
 // performRequest performs a pre-prepared http.Request and does the proper error-handling for it.
 // does a json.Unmarshal into the v interface{} and returns the error of it if everything went well so far.
 func (g *GraphClient) performRequest(req *http.Request, v interface{}) error {
@@ -144,10 +260,14 @@ func (g *GraphClient) performRequest(req *http.Request, v interface{}) error {
 		return fmt.Errorf("StatusCode is not OK: %v. Body: %v ", resp.StatusCode, string(body))
 	}
 
-	//fmt.Println("Body: ", string(body))
+	//	fmt.Println("Body: ", string(body))
 
 	if err != nil {
 		return fmt.Errorf("HTTP response read error: %v of http.Request: %v", err, req.URL)
+	}
+
+	if v == nil {
+		return nil
 	}
 
 	return json.Unmarshal(body, &v) // return the error of the json unmarshal
@@ -158,12 +278,18 @@ func (g *GraphClient) performRequest(req *http.Request, v interface{}) error {
 // Reference: https://developer.microsoft.com/en-us/graph/docs/api-reference/v1.0/api/user_list
 func (g *GraphClient) ListUsers() (Users, error) {
 	resource := "/users"
-	var marsh struct {
-		Users Users `json:"value"`
+
+	var userlist Users
+	getUsers := func(pageOfUsers *Users) error {
+		for _, u := range *pageOfUsers {
+			userlist = append(userlist, u)
+		}
+		return nil
 	}
-	err := g.makeGETAPICall(resource, nil, &marsh)
-	marsh.Users.setGraphClient(g)
-	return marsh.Users, err
+
+	err := g.makeGETUsersCall(resource, getUsers)
+	userlist.setGraphClient(g)
+	return userlist, err
 }
 
 // ListGroups returns a list of all groups
